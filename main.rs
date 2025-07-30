@@ -63,14 +63,6 @@ fn sanitize(name: &str) -> String {
     name.replace(" ", "_").replace("/", "-")
 }
 
-async fn geocode_all(client: &Client, waypoints: &[String]) -> Result<Vec<(f64, f64)>, Box<dyn Error>> {
-    let mut coords = vec![];
-    for loc in waypoints {
-        coords.push(geocode(client, loc).await?);
-    }
-    Ok(coords)
-}
-
 async fn geocode(client: &Client, query: &str) -> Result<(f64, f64), Box<dyn Error>> {
     let url = format!(
         "https://nominatim.openstreetmap.org/search?q={}&format=json&limit=1",
@@ -113,48 +105,6 @@ fn make_linestring_geojson(coords: &[(f64, f64)]) -> String {
         r#"{{ "type": "LineString", "coordinates": [{}] }}"#,
         coord_pairs.join(",")
     )
-}
-
-fn write_html_map(name: &str, geojson: &str, start: (f64, f64), end: (f64, f64)) -> Result<(), Box<dyn Error>> {
-    let sanitized = sanitize(name);
-    let mut file = File::create(format!("{}.html", sanitized))?;
-    let html = format!(
-        r#"<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>{0}</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
-</head>
-<body>
-  <div id="map" style="width: 100%; height: 100vh;"></div>
-  <script>
-    var map = L.map('map').setView([0, 0], 5);
-    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-      attribution: '&copy; OpenStreetMap contributors'
-    }}).addTo(map);
-    var geojson = {1};
-    var route = L.geoJSON(geojson).addTo(map);
-    route.bindPopup("{0}");
-    route.on('mouseover', function(e) {{
-      this.openPopup();
-    }});
-    route.on('mouseout', function(e) {{
-      this.closePopup();
-    }});
-    // Add start and end markers
-    var startMarker = L.marker([{2}, {3}]).addTo(map).bindPopup('Start');
-    var endMarker = L.marker([{4}, {5}]).addTo(map).bindPopup('End');
-    map.fitBounds(route.getBounds());
-  </script>
-</body>
-</html>"#,
-        name, geojson, start.1, start.0, end.1, end.0
-    );
-    file.write_all(html.as_bytes())?;
-    Ok(())
 }
 
 fn write_combined_html_map(trips: &[Trip], all_geojsons: &[String], all_coords: &[Vec<(f64, f64)>]) -> Result<(), Box<dyn Error>> {
