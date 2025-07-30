@@ -121,14 +121,22 @@ fn write_combined_html_map(
     all_coords: &[Vec<(f64, f64)>],
 ) -> Result<(), Box<dyn Error>> {
     let mut file = File::create("combined_map.html")?;
-    let mut geojson_features = Vec::new();
+    // let mut geojson_features = Vec::new();
+
+    // Group features by method
+    let mut car_features = Vec::new();
+    let mut plane_features = Vec::new();
 
     for (i, geojson) in all_geojsons.iter().enumerate() {
-        // Wrap geometry in a Feature for Leaflet
-        geojson_features.push(format!(
-            r#""feature-{}": {{ "type": "Feature", "geometry": {}, "properties": {{ "name": "{}" }} }}"#,
-            i, geojson, trips[i].name.replace('"', "\\\"")
-        ));
+        let method = trips[i].method.as_deref().unwrap_or("car");
+        let feature = format!(
+            r#""feature-{}": {{ "type": "Feature", "geometry": {}, "properties": {{ "name": "{}", "method": "{}" }} }}"#,
+            i, geojson, trips[i].name.replace('"', "\\\""), method
+        );
+        match method {
+            "plane" => plane_features.push(feature),
+            _ => car_features.push(feature),
+        }
     }
 
     let mut markers_js = String::new();
@@ -184,18 +192,46 @@ fn write_combined_html_map(
       attribution: '&copy; OpenStreetMap contributors'
     }}).addTo(map);
     var bounds = L.latLngBounds();
-    var geojsons = {{
-      {geojsons}
+
+    // Layer groups
+    var carLayer = L.layerGroup();
+    var planeLayer = L.layerGroup();
+
+    var carGeojsons = {{
+      {car_geojsons}
     }};
-    for (var key in geojsons) {{
-      var layer = L.geoJSON(geojsons[key]).addTo(map);
-      layer.bindPopup(geojsons[key].properties.name);
+    var planeGeojsons = {{
+      {plane_geojsons}
+    }};
+
+    for (var key in carGeojsons) {{
+      var layer = L.geoJSON(carGeojsons[key], {{color: 'blue'}}).addTo(carLayer);
+      layer.bindPopup(carGeojsons[key].properties.name);
       layer.eachLayer(function(l) {{
         if (l.getBounds) {{
           bounds.extend(l.getBounds());
         }}
       }});
     }}
+    for (var key in planeGeojsons) {{
+      var layer = L.geoJSON(planeGeojsons[key], {{color: 'red', dashArray: '5, 10'}}).addTo(planeLayer);
+      layer.bindPopup(planeGeojsons[key].properties.name);
+      layer.eachLayer(function(l) {{
+        if (l.getBounds) {{
+          bounds.extend(l.getBounds());
+        }}
+      }});
+    }}
+
+    carLayer.addTo(map);
+    planeLayer.addTo(map);
+
+    var overlays = {{
+      "Car Trips": carLayer,
+      "Plane Trips": planeLayer
+    }};
+    L.control.layers(null, overlays).addTo(map);
+
     {markers_js}
     if (bounds.isValid()) {{
       map.fitBounds(bounds);
@@ -203,7 +239,8 @@ fn write_combined_html_map(
   </script>
 </body>
 </html>"#,
-        geojsons = geojson_features.join(",\n"),
+        car_geojsons = car_features.join(",\n"),
+        plane_geojsons = plane_features.join(",\n"),
         markers_js = markers_js
     );
     file.write_all(html.as_bytes())?;
