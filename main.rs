@@ -1,12 +1,12 @@
 // main.rs
-use serde::Deserialize;
-use std::{fs, path::Path};
+use open;
 use reqwest::Client;
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
 use std::io::Write;
-use open;
-use std::collections::HashMap;
+use std::{fs, path::Path};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -68,10 +68,13 @@ async fn geocode(client: &Client, query: &str) -> Result<(f64, f64), Box<dyn Err
         "https://nominatim.openstreetmap.org/search?q={}&format=json&limit=1",
         urlencoding::encode(query)
     );
-    let resp = client.get(&url)
+    let resp = client
+        .get(&url)
         .header("User-Agent", "trip-planner-rust")
-        .send().await?
-        .json::<Vec<NominatimResult>>().await?;
+        .send()
+        .await?
+        .json::<Vec<NominatimResult>>()
+        .await?;
     if let Some(first) = resp.get(0) {
         Ok((first.lon.parse()?, first.lat.parse()?))
     } else {
@@ -80,7 +83,8 @@ async fn geocode(client: &Client, query: &str) -> Result<(f64, f64), Box<dyn Err
 }
 
 async fn get_route(client: &Client, coords: &[(f64, f64)]) -> Result<String, Box<dyn Error>> {
-    let coord_strings: Vec<String> = coords.iter()
+    let coord_strings: Vec<String> = coords
+        .iter()
         .map(|(lon, lat)| format!("{},{}", lon, lat))
         .collect();
     let url = format!(
@@ -88,17 +92,21 @@ async fn get_route(client: &Client, coords: &[(f64, f64)]) -> Result<String, Box
         coord_strings.join(";")
     );
 
-    let resp = client.get(&url)
+    let resp = client
+        .get(&url)
         .header("User-Agent", "trip-planner-rust")
-        .send().await?
-        .json::<osrm::RouteResponse>().await?;
-    
+        .send()
+        .await?
+        .json::<osrm::RouteResponse>()
+        .await?;
+
     let geojson = serde_json::to_string(&resp.routes[0].geometry)?;
     Ok(geojson)
 }
 
 fn make_linestring_geojson(coords: &[(f64, f64)]) -> String {
-    let coord_pairs: Vec<String> = coords.iter()
+    let coord_pairs: Vec<String> = coords
+        .iter()
         .map(|(lon, lat)| format!("[{},{}]", lon, lat))
         .collect();
     format!(
@@ -107,7 +115,11 @@ fn make_linestring_geojson(coords: &[(f64, f64)]) -> String {
     )
 }
 
-fn write_combined_html_map(trips: &[Trip], all_geojsons: &[String], all_coords: &[Vec<(f64, f64)>]) -> Result<(), Box<dyn Error>> {
+fn write_combined_html_map(
+    trips: &[Trip],
+    all_geojsons: &[String],
+    all_coords: &[Vec<(f64, f64)>],
+) -> Result<(), Box<dyn Error>> {
     let mut file = File::create("combined_map.html")?;
     let mut geojson_features = Vec::new();
 
@@ -215,7 +227,7 @@ fn save_geocode_cache(cache: &HashMap<String, (f64, f64)>) {
 async fn geocode_all_cached(
     client: &Client,
     waypoints: &[String],
-    cache: &mut HashMap<String, (f64, f64)>
+    cache: &mut HashMap<String, (f64, f64)>,
 ) -> Result<Vec<(f64, f64)>, Box<dyn Error>> {
     let mut coords = vec![];
     for loc in waypoints {
@@ -278,7 +290,8 @@ fn haversine(coord1: (f64, f64), coord2: (f64, f64)) -> f64 {
 }
 
 async fn get_route_distance(client: &Client, coords: &[(f64, f64)]) -> Result<f64, Box<dyn Error>> {
-    let coord_strings: Vec<String> = coords.iter()
+    let coord_strings: Vec<String> = coords
+        .iter()
         .map(|(lon, lat)| format!("{},{}", lon, lat))
         .collect();
     let url = format!(
@@ -286,10 +299,13 @@ async fn get_route_distance(client: &Client, coords: &[(f64, f64)]) -> Result<f6
         coord_strings.join(";")
     );
 
-    let resp = client.get(&url)
+    let resp = client
+        .get(&url)
         .header("User-Agent", "trip-planner-rust")
-        .send().await?
-        .json::<osrm::RouteResponse>().await?;
-    
+        .send()
+        .await?
+        .json::<osrm::RouteResponse>()
+        .await?;
+
     Ok(resp.routes[0].distance / 1609.34) // meters to miles
 }
