@@ -8,6 +8,7 @@ pkgs.mkShell {
     clippy
     pkg-config
     openssl
+    gh           # Added GitHub CLI
   ];
 
   # Needed by reqwest with rustls-tls and/or native-tls
@@ -15,6 +16,6 @@ pkgs.mkShell {
 
   shellHook = ''
     echo "Welcome to the Trip Planner Rust Dev Shell!"
-    echo "Dependencies loaded: Rust, Cargo, rustfmt, clippy, OpenSSL"
+    echo "Dependencies loaded: Rust, Cargo, rustfmt, clippy, OpenSSL, GitHub CLI"
   '';
 }
