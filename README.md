@@ -70,5 +70,3 @@ cargo run
 MIT License
 
 ---
-
-Welcome to the Trip Mapper Rust Dev Shell!
