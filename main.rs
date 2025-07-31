@@ -1,295 +1,91 @@
 // main.rs
-use open;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
 use std::io::Write;
-use std::{fs, path::Path};
+use std::path::Path;
+use std::{fmt, fs};
+use tokio::time::{sleep, Duration};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let trips: TripFile = parse_yaml("trips.yaml")?;
-    let client = Client::new();
-
-    let mut all_geojsons = Vec::new();
-    let mut all_coords = Vec::new();
-    let mut totals: HashMap<String, f64> = HashMap::new();
-
-    // Load geocode cache
-    let mut geocode_cache = load_geocode_cache();
-
-    for trip in &trips.trips {
-        println!("Processing trip: {}", trip.name);
-        let coords = geocode_all_cached(&client, &trip.waypoints, &mut geocode_cache).await?;
-        let method = trip.method.clone().unwrap_or_else(|| "car".to_string());
-        let distance = match method.as_str() {
-            "car" => get_route_distance(&client, &coords).await?,
-            _ => coords.windows(2).map(|w| haversine(w[0], w[1])).sum(),
-        };
-        *totals.entry(method.clone()).or_insert(0.0) += distance;
-
-        let route_geojson = match trip.method.as_deref() {
-            Some("car") | None => get_route(&client, &coords).await?,
-            _ => make_linestring_geojson(&coords),
-        };
-        all_geojsons.push(route_geojson);
-        all_coords.push(coords);
-    }
-
-    // Save geocode cache
-    save_geocode_cache(&geocode_cache);
-
-    // Write combined map
-    write_combined_html_map(&trips.trips, &all_geojsons, &all_coords)?;
-
-    // Print totals
-    println!("");
-    for (method, miles) in &totals {
-        println!("Total {} miles: {:.1}", method, miles);
-    }
-
-    Ok(())
+// Custom error types for better error handling
+#[derive(Debug)]
+enum TripPlannerError {
+    Io(std::io::Error),
+    Yaml(serde_yaml::Error),
+    Json(serde_json::Error),
+    Network(reqwest::Error),
+    Geocoding(String),
 }
 
-fn parse_yaml<P: AsRef<Path>>(path: P) -> Result<TripFile, Box<dyn Error>> {
-    let content = fs::read_to_string(path)?;
-    let parsed: TripFile = serde_yaml::from_str(&content)?;
-    Ok(parsed)
-}
-
-fn sanitize(name: &str) -> String {
-    name.replace(" ", "_").replace("/", "-")
-}
-
-async fn geocode(client: &Client, query: &str) -> Result<(f64, f64), Box<dyn Error>> {
-    let url = format!(
-        "https://nominatim.openstreetmap.org/search?q={}&format=json&limit=1",
-        urlencoding::encode(query)
-    );
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "trip-planner-rust")
-        .send()
-        .await?
-        .json::<Vec<NominatimResult>>()
-        .await?;
-    if let Some(first) = resp.get(0) {
-        Ok((first.lon.parse()?, first.lat.parse()?))
-    } else {
-        Err(format!("Location not found for query: '{}', url: {}", query, url).into())
-    }
-}
-
-async fn get_route(client: &Client, coords: &[(f64, f64)]) -> Result<String, Box<dyn Error>> {
-    let coord_strings: Vec<String> = coords
-        .iter()
-        .map(|(lon, lat)| format!("{},{}", lon, lat))
-        .collect();
-    let url = format!(
-        "https://router.project-osrm.org/route/v1/driving/{}?overview=full&geometries=geojson",
-        coord_strings.join(";")
-    );
-
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "trip-planner-rust")
-        .send()
-        .await?
-        .json::<osrm::RouteResponse>()
-        .await?;
-
-    let geojson = serde_json::to_string(&resp.routes[0].geometry)?;
-    Ok(geojson)
-}
-
-fn make_linestring_geojson(coords: &[(f64, f64)]) -> String {
-    let coord_pairs: Vec<String> = coords
-        .iter()
-        .map(|(lon, lat)| format!("[{},{}]", lon, lat))
-        .collect();
-    format!(
-        r#"{{ "type": "LineString", "coordinates": [{}] }}"#,
-        coord_pairs.join(",")
-    )
-}
-
-fn write_combined_html_map(
-    trips: &[Trip],
-    all_geojsons: &[String],
-    all_coords: &[Vec<(f64, f64)>],
-) -> Result<(), Box<dyn Error>> {
-    let mut file = File::create("combined_map.html")?;
-    // let mut geojson_features = Vec::new();
-
-    // Group features by method
-    let mut car_features = Vec::new();
-    let mut plane_features = Vec::new();
-
-    for (i, geojson) in all_geojsons.iter().enumerate() {
-        let method = trips[i].method.as_deref().unwrap_or("car");
-        let feature = format!(
-            r#""feature-{}": {{ "type": "Feature", "geometry": {}, "properties": {{ "name": "{}", "method": "{}" }} }}"#,
-            i, geojson, trips[i].name.replace('"', "\\\""), method
-        );
-        match method {
-            "plane" => plane_features.push(feature),
-            _ => car_features.push(feature),
+impl fmt::Display for TripPlannerError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            TripPlannerError::Io(e) => write!(f, "IO error: {}", e),
+            TripPlannerError::Yaml(e) => write!(f, "YAML parsing error: {}", e),
+            TripPlannerError::Json(e) => write!(f, "JSON error: {}", e),
+            TripPlannerError::Network(e) => write!(f, "Network error: {}", e),
+            TripPlannerError::Geocoding(msg) => write!(f, "Geocoding error: {}", msg),
         }
     }
-
-    let mut markers_js = String::new();
-    for (i, coords) in all_coords.iter().enumerate() {
-        if !coords.is_empty() {
-            let start = coords.first().unwrap();
-            let end = coords.last().unwrap();
-            let trip_name = trips[i].name.replace('\'', "\\'");
-            // Start marker (default red)
-            markers_js.push_str(&format!(
-                "L.marker([{lat}, {lon}]).addTo(map).bindPopup('Start: {trip_name}');\n",
-                lat = start.1,
-                lon = start.0,
-                trip_name = trip_name
-            ));
-            // End marker (default red)
-            markers_js.push_str(&format!(
-                "L.marker([{lat}, {lon}]).addTo(map).bindPopup('End: {trip_name}');\n",
-                lat = end.1,
-                lon = end.0,
-                trip_name = trip_name
-            ));
-            // Intermediate waypoints (blue)
-            if coords.len() > 2 {
-                for (j, (lon, lat)) in coords.iter().enumerate().skip(1).take(coords.len() - 2) {
-                    let waypoint_label = trips[i].waypoints[j].replace('\'', "\\'");
-                    markers_js.push_str(&format!(
-                        "L.circleMarker([{lat}, {lon}], {{radius: 3, color: 'red', fillColor: 'blue', fillOpacity: 0.8}}).addTo(map).bindPopup('Waypoint: {waypoint_label}');\n",
-                        lat = lat,
-                        lon = lon,
-                        waypoint_label = waypoint_label
-                    ));
-                }
-            }
-        }
-    }
-
-    let html = format!(
-        r#"<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Combined Trip Map</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
-</head>
-<body>
-  <div id="map" style="width: 100%; height: 100vh;"></div>
-  <script>
-    var map = L.map('map').setView([0, 0], 2);
-    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-      attribution: '&copy; OpenStreetMap contributors'
-    }}).addTo(map);
-    var bounds = L.latLngBounds();
-
-    // Layer groups
-    var carLayer = L.layerGroup();
-    var planeLayer = L.layerGroup();
-
-    var carGeojsons = {{
-      {car_geojsons}
-    }};
-    var planeGeojsons = {{
-      {plane_geojsons}
-    }};
-
-    for (var key in carGeojsons) {{
-      var layer = L.geoJSON(carGeojsons[key], {{color: 'blue'}}).addTo(carLayer);
-      layer.bindPopup(carGeojsons[key].properties.name);
-      layer.eachLayer(function(l) {{
-        if (l.getBounds) {{
-          bounds.extend(l.getBounds());
-        }}
-      }});
-    }}
-    for (var key in planeGeojsons) {{
-      var layer = L.geoJSON(planeGeojsons[key], {{color: 'red', dashArray: '5, 10'}}).addTo(planeLayer);
-      layer.bindPopup(planeGeojsons[key].properties.name);
-      layer.eachLayer(function(l) {{
-        if (l.getBounds) {{
-          bounds.extend(l.getBounds());
-        }}
-      }});
-    }}
-
-    carLayer.addTo(map);
-    planeLayer.addTo(map);
-
-    var overlays = {{
-      "Car Trips": carLayer,
-      "Plane Trips": planeLayer
-    }};
-    L.control.layers(null, overlays).addTo(map);
-
-    {markers_js}
-    if (bounds.isValid()) {{
-      map.fitBounds(bounds);
-    }}
-  </script>
-</body>
-</html>"#,
-        car_geojsons = car_features.join(",\n"),
-        plane_geojsons = plane_features.join(",\n"),
-        markers_js = markers_js
-    );
-    file.write_all(html.as_bytes())?;
-    Ok(())
 }
 
-fn load_geocode_cache() -> HashMap<String, (f64, f64)> {
-    let path = "geocode_cache.json";
-    if let Ok(data) = std::fs::read_to_string(path) {
-        serde_json::from_str(&data).unwrap_or_default()
-    } else {
-        HashMap::new()
+impl Error for TripPlannerError {}
+
+impl From<std::io::Error> for TripPlannerError {
+    fn from(error: std::io::Error) -> Self {
+        TripPlannerError::Io(error)
     }
 }
 
-fn save_geocode_cache(cache: &HashMap<String, (f64, f64)>) {
-    let data = serde_json::to_string_pretty(cache).unwrap();
-    std::fs::write("geocode_cache.json", data).unwrap();
+impl From<serde_yaml::Error> for TripPlannerError {
+    fn from(error: serde_yaml::Error) -> Self {
+        TripPlannerError::Yaml(error)
+    }
 }
 
-async fn geocode_all_cached(
-    client: &Client,
-    waypoints: &[String],
-    cache: &mut HashMap<String, (f64, f64)>,
-) -> Result<Vec<(f64, f64)>, Box<dyn Error>> {
-    let mut coords = vec![];
-    for loc in waypoints {
-        if let Some(&coord) = cache.get(loc) {
-            coords.push(coord);
-        } else {
-            let coord = geocode(client, loc).await?;
-            cache.insert(loc.clone(), coord);
-            coords.push(coord);
-        }
+impl From<serde_json::Error> for TripPlannerError {
+    fn from(error: serde_json::Error) -> Self {
+        TripPlannerError::Json(error)
     }
-    Ok(coords)
 }
+
+impl From<reqwest::Error> for TripPlannerError {
+    fn from(error: reqwest::Error) -> Self {
+        TripPlannerError::Network(error)
+    }
+}
+
+// Configuration constants
+const NOMINATIM_BASE_URL: &str = "https://nominatim.openstreetmap.org/search";
+const OSRM_BASE_URL: &str = "https://router.project-osrm.org/route/v1/driving";
+const USER_AGENT: &str = "trip-planner-rust";
+const GEOCODE_CACHE_FILE: &str = "geocode_cache.json";
+const ROUTE_CACHE_FILE: &str = "route_cache.json";
+const OUTPUT_FILE: &str = "combined_map.html";
+const METERS_TO_MILES: f64 = 1609.34;
+const EARTH_RADIUS_MILES: f64 = 3958.8;
+const API_DELAY_MS: u64 = 100; // Rate limiting delay
+const CACHE_EXPIRY_DAYS: u64 = 30; // Routes expire after 30 days
 
 #[derive(Debug, Deserialize)]
 struct TripFile {
     trips: Vec<Trip>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct Trip {
     name: String,
     date: Option<String>,
     method: Option<String>,
     waypoints: Vec<String>,
+}
+
+impl Trip {
+    fn get_method(&self) -> &str {
+        self.method.as_deref().unwrap_or("car")
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -298,22 +94,553 @@ struct NominatimResult {
     lon: String,
 }
 
-mod osrm {
-    use serde::Deserialize;
+#[derive(Debug, Deserialize, Clone)]
+struct RouteResponse {
+    routes: Vec<Route>,
+}
 
-    #[derive(Debug, Deserialize, Clone)]
-    pub struct RouteResponse {
-        pub routes: Vec<Route>,
+#[derive(Debug, Deserialize, Clone)]
+struct Route {
+    geometry: serde_json::Value,
+    distance: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct OSRMErrorResponse {
+    code: Option<String>,
+    message: Option<String>,
+}
+
+type Coordinates = (f64, f64);
+type GeocodeCache = HashMap<String, Coordinates>;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct CachedRoute {
+    geojson: String,
+    distance_miles: f64,
+    cached_at: u64, // Unix timestamp
+}
+
+type RouteCache = HashMap<String, CachedRoute>;
+
+struct TripProcessor {
+    client: Client,
+    geocode_cache: GeocodeCache,
+    route_cache: RouteCache,
+}
+
+impl TripProcessor {
+    fn new() -> Self {
+        let geocode_cache = Self::load_geocode_cache();
+        let mut route_cache = Self::load_route_cache();
+        
+        // Clean up expired routes
+        let initial_route_count = route_cache.len();
+        Self::cleanup_expired_routes(&mut route_cache);
+        let cleaned_route_count = route_cache.len();
+        
+        if initial_route_count != cleaned_route_count {
+            println!("Cleaned up {} expired route entries", initial_route_count - cleaned_route_count);
+        }
+        
+        println!("Geocode cache loaded with {} entries", geocode_cache.len());
+        println!("Route cache loaded with {} entries", route_cache.len());
+        
+        Self {
+            client: Client::new(),
+            geocode_cache,
+            route_cache,
+        }
     }
 
-    #[derive(Debug, Deserialize, Clone)]
-    pub struct Route {
-        pub geometry: serde_json::Value,
-        pub distance: f64,
+    fn load_geocode_cache() -> GeocodeCache {
+        match fs::read_to_string(GEOCODE_CACHE_FILE) {
+            Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+            Err(_) => HashMap::new(),
+        }
+    }
+
+    fn load_route_cache() -> RouteCache {
+        match fs::read_to_string(ROUTE_CACHE_FILE) {
+            Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+            Err(_) => HashMap::new(),
+        }
+    }
+
+    fn save_geocode_cache(&self) -> Result<(), TripPlannerError> {
+        let data = serde_json::to_string_pretty(&self.geocode_cache)?;
+        fs::write(GEOCODE_CACHE_FILE, data)?;
+        println!("Saved geocode cache with {} entries", self.geocode_cache.len());
+        Ok(())
+    }
+
+    fn save_route_cache(&self) -> Result<(), TripPlannerError> {
+        let data = serde_json::to_string_pretty(&self.route_cache)?;
+        fs::write(ROUTE_CACHE_FILE, data)?;
+        println!("Saved route cache with {} entries", self.route_cache.len());
+        Ok(())
+    }
+
+    fn save_all_caches(&self) -> Result<(), TripPlannerError> {
+        self.save_geocode_cache()?;
+        self.save_route_cache()?;
+        Ok(())
+    }
+
+    /// Generate a cache key for a route based on coordinates
+    /// Rounds coordinates to 4 decimal places (~11m precision) to allow for small variations
+    fn generate_route_cache_key(&self, coords: &[Coordinates]) -> String {
+        let rounded_coords: Vec<String> = coords
+            .iter()
+            .map(|(lon, lat)| format!("{:.4},{:.4}", lon, lat))
+            .collect();
+        format!("route:{}", rounded_coords.join(";"))
+    }
+
+    fn get_current_timestamp() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn cleanup_expired_routes(route_cache: &mut RouteCache) {
+        let current_time = Self::get_current_timestamp();
+        let expiry_threshold = current_time - (CACHE_EXPIRY_DAYS * 24 * 60 * 60);
+        
+        route_cache.retain(|_, cached_route| {
+            cached_route.cached_at > expiry_threshold
+        });
+    }
+
+    async fn geocode(&mut self, query: &str) -> Result<Coordinates, TripPlannerError> {
+        // Check cache first
+        if let Some(&coords) = self.geocode_cache.get(query) {
+            // println!("Using cached coordinates for '{}': {:?}", query, coords);
+            return Ok(coords);
+        }
+
+        // Rate limiting
+        sleep(Duration::from_millis(API_DELAY_MS)).await;
+
+        let url = format!(
+            "{}?q={}&format=json&limit=1",
+            NOMINATIM_BASE_URL,
+            urlencoding::encode(query)
+        );
+
+        let resp = self
+            .client
+            .get(&url)
+            .header("User-Agent", USER_AGENT)
+            .send()
+            .await?
+            .json::<Vec<NominatimResult>>()
+            .await?;
+
+        if let Some(result) = resp.first() {
+            let coords = (
+                result.lon.parse().map_err(|_| {
+                    TripPlannerError::Geocoding(format!("Invalid longitude for query: '{}'", query))
+                })?,
+                result.lat.parse().map_err(|_| {
+                    TripPlannerError::Geocoding(format!("Invalid latitude for query: '{}'", query))
+                })?,
+            );
+
+            self.geocode_cache.insert(query.to_string(), coords);
+            println!("Geocoded '{}': {:?}", query, coords);
+            Ok(coords)
+        } else {
+            Err(TripPlannerError::Geocoding(format!(
+                "Location not found for query: '{}'",
+                query
+            )))
+        }
+    }
+
+    async fn geocode_waypoints(&mut self, waypoints: &[String]) -> Result<Vec<Coordinates>, TripPlannerError> {
+        let mut coords = Vec::with_capacity(waypoints.len());
+        for waypoint in waypoints {
+            coords.push(self.geocode(waypoint).await?);
+        }
+        Ok(coords)
+    }
+
+    async fn get_route_data(
+        &mut self,
+        coords: &[Coordinates],
+    ) -> Result<(String, f64), TripPlannerError> {
+        // Check cache first
+        let cache_key = self.generate_route_cache_key(coords);
+        if let Some(cached_route) = self.route_cache.get(&cache_key) {
+            println!("Using cached route for {} coordinates", coords.len());
+            return Ok((cached_route.geojson.clone(), cached_route.distance_miles));
+        }
+
+        let coord_strings: Vec<String> = coords
+            .iter()
+            .map(|(lon, lat)| format!("{},{}", lon, lat))
+            .collect();
+
+        let url = format!(
+            "{}/{}?overview=full&geometries=geojson",
+            OSRM_BASE_URL,
+            coord_strings.join(";")
+        );
+
+        // println!("Requesting route from OSRM: {}", url);
+
+        // Rate limiting for API calls
+        sleep(Duration::from_millis(API_DELAY_MS)).await;
+
+        let response = self
+            .client
+            .get(&url)
+            .header("User-Agent", USER_AGENT)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let response_text = response.text().await?;
+        
+        if !status.is_success() {
+            return Err(TripPlannerError::Geocoding(format!(
+                "OSRM API returned status {}: {}",
+                status, response_text
+            )));
+        }
+
+        // println!("OSRM Response: {}", response_text);
+
+        // Try to parse as RouteResponse first
+        match serde_json::from_str::<RouteResponse>(&response_text) {
+            Ok(resp) => {
+                let route = resp
+                    .routes
+                    .first()
+                    .ok_or_else(|| TripPlannerError::Geocoding("No routes in response".to_string()))?;
+
+                let geojson = serde_json::to_string(&route.geometry)?;
+                let distance_miles = route.distance / METERS_TO_MILES;
+
+                // Cache the successful route
+                let cached_route = CachedRoute {
+                    geojson: geojson.clone(),
+                    distance_miles,
+                    cached_at: Self::get_current_timestamp(),
+                };
+                self.route_cache.insert(cache_key, cached_route);
+
+                Ok((geojson, distance_miles))
+            }
+            Err(e) => {
+                // Try to parse as error response
+                if let Ok(error_resp) = serde_json::from_str::<OSRMErrorResponse>(&response_text) {
+                    Err(TripPlannerError::Geocoding(format!(
+                        "OSRM API error: {} - {}",
+                        error_resp.code.unwrap_or_else(|| "Unknown".to_string()),
+                        error_resp.message.unwrap_or_else(|| "No message".to_string())
+                    )))
+                } else {
+                    Err(TripPlannerError::Json(e))
+                }
+            }
+        }
+    }
+
+    fn calculate_haversine_distance(&self, coords: &[Coordinates]) -> f64 {
+        coords
+            .windows(2)
+            .map(|window| haversine_distance(window[0], window[1]))
+            .sum()
+    }
+
+    async fn process_trip(&mut self, trip: &Trip) -> Result<TripResult, TripPlannerError> {
+        println!("Processing trip: {}", trip.name);
+
+        let coords = self.geocode_waypoints(&trip.waypoints).await?;
+        let method = trip.get_method();
+
+        let (geojson, distance) = match method {
+            "car" => {
+                // Try to get route data from OSRM, fall back to straight line if it fails
+                match self.get_route_data(&coords).await {
+                    Ok((geojson, distance)) => (geojson, distance),
+                    Err(e) => {
+                        println!("OSRM route failed ({}), falling back to straight-line distance", e);
+                        let distance = self.calculate_haversine_distance(&coords);
+                        let geojson = create_linestring_geojson(&coords);
+                        (geojson, distance)
+                    }
+                }
+            }
+            _ => {
+                let distance = self.calculate_haversine_distance(&coords);
+                let geojson = create_linestring_geojson(&coords);
+                (geojson, distance)
+            }
+        };
+
+        Ok(TripResult {
+            trip: trip.clone(),
+            coords,
+            geojson,
+            distance,
+        })
     }
 }
 
-fn haversine(coord1: (f64, f64), coord2: (f64, f64)) -> f64 {
+struct TripResult {
+    trip: Trip,
+    coords: Vec<Coordinates>,
+    geojson: String,
+    distance: f64,
+}
+
+struct MapGenerator;
+
+impl MapGenerator {
+    fn generate_html(trip_results: &[TripResult]) -> Result<String, TripPlannerError> {
+        let (car_features, plane_features) = Self::group_features_by_method(trip_results);
+        let markers_js = Self::generate_markers_js(trip_results);
+
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Combined Trip Map</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+  <style>
+    body {{ margin: 0; padding: 0; }}
+    #map {{ width: 100%; height: 100vh; }}
+    .legend {{
+      background: white;
+      padding: 10px;
+      border-radius: 5px;
+      box-shadow: 0 0 15px rgba(0,0,0,0.2);
+    }}
+    .legend h4 {{ margin: 0 0 10px 0; }}
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script>
+    // Initialize map
+    var map = L.map('map').setView([0, 0], 2);
+    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }}).addTo(map);
+
+    var bounds = L.latLngBounds();
+
+    // Layer groups
+    var carLayer = L.layerGroup();
+    var planeLayer = L.layerGroup();
+
+    // GeoJSON data
+    var carGeojsons = {{
+      {}
+    }};
+    
+    var planeGeojsons = {{
+      {}
+    }};
+
+    // Add car routes
+    for (var key in carGeojsons) {{
+      var layer = L.geoJSON(carGeojsons[key], {{
+        color: '#2563eb',
+        weight: 3,
+        opacity: 0.8
+      }}).addTo(carLayer);
+      
+      layer.bindPopup('<strong>' + carGeojsons[key].properties.name + '</strong><br>Method: ' + carGeojsons[key].properties.method);
+      
+      layer.eachLayer(function(l) {{
+        if (l.getBounds) {{
+          bounds.extend(l.getBounds());
+        }}
+      }});
+    }}
+
+    // Add plane routes
+    for (var key in planeGeojsons) {{
+      var layer = L.geoJSON(planeGeojsons[key], {{
+        color: '#dc2626',
+        weight: 2,
+        opacity: 0.8,
+        dashArray: '10, 5'
+      }}).addTo(planeLayer);
+      
+      layer.bindPopup('<strong>' + planeGeojsons[key].properties.name + '</strong><br>Method: ' + planeGeojsons[key].properties.method);
+      
+      layer.eachLayer(function(l) {{
+        if (l.getBounds) {{
+          bounds.extend(l.getBounds());
+        }}
+      }});
+    }}
+
+    // Add layers to map
+    carLayer.addTo(map);
+    planeLayer.addTo(map);
+
+    // Layer control
+    var overlays = {{
+      "Car Trips": carLayer,
+      "Plane Trips": planeLayer
+    }};
+    L.control.layers(null, overlays).addTo(map);
+
+    // Add markers
+{}
+
+    // Fit bounds
+    if (bounds.isValid()) {{
+      map.fitBounds(bounds, {{padding: [20, 20]}});
+    }}
+
+    // Add custom legend
+    var legend = L.control({{position: 'bottomright'}});
+    legend.onAdd = function (map) {{
+      var div = L.DomUtil.create('div', 'legend');
+      div.innerHTML = `
+        <h4>Trip Types</h4>
+        <div><span style="color: #2563eb; font-weight: bold;">━━━</span> Car Trips</div>
+        <div><span style="color: #dc2626; font-weight: bold;">┅┅┅</span> Plane Trips</div>
+        <div style="margin-top: 10px;">
+          <span style="color: #dc2626;">●</span> Start/End Points<br>
+          <span style="color: #2563eb;">●</span> Waypoints
+        </div>
+      `;
+      return div;
+    }};
+    legend.addTo(map);
+  </script>
+</body>
+</html>"#,
+            car_features.join(",\n      "),
+            plane_features.join(",\n      "),
+            markers_js
+        );
+
+        Ok(html)
+    }
+
+    fn group_features_by_method(trip_results: &[TripResult]) -> (Vec<String>, Vec<String>) {
+        let mut car_features = Vec::new();
+        let mut plane_features = Vec::new();
+
+        for (i, result) in trip_results.iter().enumerate() {
+            let feature = format!(
+                r#""feature-{}": {{
+          "type": "Feature",
+          "geometry": {},
+          "properties": {{
+            "name": "{}",
+            "method": "{}"
+          }}
+        }}"#,
+                i,
+                result.geojson,
+                result.trip.name.replace('"', "\\\""),
+                result.trip.get_method()
+            );
+
+            match result.trip.get_method() {
+                "plane" => plane_features.push(feature),
+                _ => car_features.push(feature),
+            }
+        }
+
+        (car_features, plane_features)
+    }
+
+    fn generate_markers_js(trip_results: &[TripResult]) -> String {
+        let mut markers_js = String::new();
+
+        for result in trip_results {
+            if result.coords.is_empty() {
+                continue;
+            }
+
+            let trip_name = result.trip.name.replace('\'', "\\'");
+            let start = result.coords[0];
+            let end = result.coords[result.coords.len() - 1];
+
+            // Start and end markers
+            markers_js.push_str(&format!(
+                "    L.marker([{}, {}]).addTo(map).bindPopup('Start: {}');\n",
+                start.1, start.0, trip_name
+            ));
+            markers_js.push_str(&format!(
+                "    L.marker([{}, {}]).addTo(map).bindPopup('End: {}');\n",
+                end.1, end.0, trip_name
+            ));
+
+            // Intermediate waypoints
+            for (i, &(lon, lat)) in result.coords.iter().enumerate().skip(1).take(result.coords.len() - 2) {
+                let waypoint_label = result.trip.waypoints.get(i).map_or("Waypoint".to_string(), |w| w.replace('\'', "\\'"));
+                markers_js.push_str(&format!(
+                    "    L.circleMarker([{}, {}], {{radius: 3, color: 'red', fillColor: 'blue', fillOpacity: 0.8}}).addTo(map).bindPopup('Waypoint: {}');\n",
+                    lat, lon, waypoint_label
+                ));
+            }
+        }
+
+        markers_js
+    }
+
+    fn write_to_file(html: &str) -> Result<(), TripPlannerError> {
+        let mut file = File::create(OUTPUT_FILE)?;
+        file.write_all(html.as_bytes())?;
+        println!("Map written to {}", OUTPUT_FILE);
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), TripPlannerError> {
+    let trip_file = parse_yaml("trips.yaml")?;
+    let mut processor = TripProcessor::new();
+
+    let mut trip_results = Vec::new();
+    let mut totals: HashMap<String, f64> = HashMap::new();
+
+    // Process all trips
+    for trip in &trip_file.trips {
+        let result = processor.process_trip(trip).await?;
+        *totals.entry(result.trip.get_method().to_string()).or_insert(0.0) += result.distance;
+        trip_results.push(result);
+    }
+
+    // Save updated caches
+    processor.save_all_caches()?;
+
+    // Generate and write map
+    let html = MapGenerator::generate_html(&trip_results)?;
+    MapGenerator::write_to_file(&html)?;
+
+    // Print totals
+    println!("\n=== Distance Totals ===");
+    for (method, miles) in &totals {
+        println!("{}: {:.1} miles", method.to_uppercase(), miles);
+    }
+
+    Ok(())
+}
+
+fn parse_yaml<P: AsRef<Path>>(path: P) -> Result<TripFile, TripPlannerError> {
+    let content = fs::read_to_string(path)?;
+    let parsed: TripFile = serde_yaml::from_str(&content)?;
+    Ok(parsed)
+}
+
+fn haversine_distance(coord1: Coordinates, coord2: Coordinates) -> f64 {
     let (lon1, lat1) = (coord1.0.to_radians(), coord1.1.to_radians());
     let (lon2, lat2) = (coord2.0.to_radians(), coord2.1.to_radians());
 
@@ -323,26 +650,17 @@ fn haversine(coord1: (f64, f64), coord2: (f64, f64)) -> f64 {
     let a = dlat.sin().powi(2) + lat1.cos() * lat2.cos() * dlon.sin().powi(2);
     let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
 
-    3958.8 * c // Returns distance in miles
+    EARTH_RADIUS_MILES * c
 }
 
-async fn get_route_distance(client: &Client, coords: &[(f64, f64)]) -> Result<f64, Box<dyn Error>> {
-    let coord_strings: Vec<String> = coords
+fn create_linestring_geojson(coords: &[Coordinates]) -> String {
+    let coord_pairs: Vec<String> = coords
         .iter()
-        .map(|(lon, lat)| format!("{},{}", lon, lat))
+        .map(|(lon, lat)| format!("[{},{}]", lon, lat))
         .collect();
-    let url = format!(
-        "https://router.project-osrm.org/route/v1/driving/{}?overview=full",
-        coord_strings.join(";")
-    );
 
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "trip-planner-rust")
-        .send()
-        .await?
-        .json::<osrm::RouteResponse>()
-        .await?;
-
-    Ok(resp.routes[0].distance / 1609.34) // meters to miles
+    format!(
+        r#"{{"type": "LineString", "coordinates": [{}]}}"#,
+        coord_pairs.join(",")
+    )
 }

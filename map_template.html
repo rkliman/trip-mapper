@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Combined Trip Map</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+  <style>
+    body { margin: 0; padding: 0; }
+    #map { width: 100%; height: 100vh; }
+    .legend {
+      background: white;
+      padding: 10px;
+      border-radius: 5px;
+      box-shadow: 0 0 15px rgba(0,0,0,0.2);
+    }
+    .legend h4 { margin: 0 0 10px 0; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script>
+    // Initialize map
+    var map = L.map('map').setView([0, 0], 2);
+    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }}).addTo(map);
+
+    var bounds = L.latLngBounds();
+
+    // Layer groups
+    var carLayer = L.layerGroup();
+    var planeLayer = L.layerGroup();
+
+    // GeoJSON data
+    var carGeojsons = {{
+      {car_geojsons}
+    }};
+    
+    var planeGeojsons = {{
+      {plane_geojsons}
+    }};
+
+    // Add car routes
+    for (var key in carGeojsons) {{
+      var layer = L.geoJSON(carGeojsons[key], {{
+        color: '#2563eb',
+        weight: 3,
+        opacity: 0.8
+      }}).addTo(carLayer);
+      
+      layer.bindPopup('<strong>' + carGeojsons[key].properties.name + '</strong><br>Method: ' + carGeojsons[key].properties.method);
+      
+      layer.eachLayer(function(l) {{
+        if (l.getBounds) {{
+          bounds.extend(l.getBounds());
+        }}
+      }});
+    }}
+
+    // Add plane routes
+    for (var key in planeGeojsons) {{
+      var layer = L.geoJSON(planeGeojsons[key], {{
+        color: '#dc2626',
+        weight: 2,
+        opacity: 0.8,
+        dashArray: '10, 5'
+      }}).addTo(planeLayer);
+      
+      layer.bindPopup('<strong>' + planeGeojsons[key].properties.name + '</strong><br>Method: ' + planeGeojsons[key].properties.method);
+      
+      layer.eachLayer(function(l) {{
+        if (l.getBounds) {{
+          bounds.extend(l.getBounds());
+        }}
+      }});
+    }}
+
+    // Add layers to map
+    carLayer.addTo(map);
+    planeLayer.addTo(map);
+
+    // Layer control
+    var overlays = {{
+      "Car Trips": carLayer,
+      "Plane Trips": planeLayer
+    }};
+    L.control.layers(null, overlays).addTo(map);
+
+    // Add markers
+{markers_js}
+
+    // Fit bounds
+    if (bounds.isValid()) {{
+      map.fitBounds(bounds, {{padding: [20, 20]}});
+    }}
+
+    // Add custom legend
+    var legend = L.control({{position: 'bottomright'}});
+    legend.onAdd = function (map) {{
+      var div = L.DomUtil.create('div', 'legend');
+      div.innerHTML = `
+        <h4>Trip Types</h4>
+        <div><span style="color: #2563eb; font-weight: bold;">━━━</span> Car Trips</div>
+        <div><span style="color: #dc2626; font-weight: bold;">┅┅┅</span> Plane Trips</div>
+        <div style="margin-top: 10px;">
+          <span style="color: #dc2626;">●</span> Start/End Points<br>
+          <span style="color: #2563eb;">●</span> Waypoints
+        </div>
+      `;
+      return div;
+    }};
+    legend.addTo(map);
+  </script>
+</body>
+</html>
