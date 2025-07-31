@@ -68,6 +68,7 @@ const METERS_TO_MILES: f64 = 1609.34;
 const EARTH_RADIUS_MILES: f64 = 3958.8;
 const API_DELAY_MS: u64 = 100; // Rate limiting delay
 const CACHE_EXPIRY_DAYS: u64 = 30; // Routes expire after 30 days
+const GEODESIC_SEGMENTS: usize = 100; // Number of segments for geodesic curves
 
 #[derive(Debug, Deserialize)]
 struct TripFile {
@@ -375,6 +376,12 @@ impl TripProcessor {
                     }
                 }
             }
+            "plane" => {
+                // Use geodesic curves for plane trips
+                let distance = self.calculate_haversine_distance(&coords);
+                let geojson = create_geodesic_geojson(&coords);
+                (geojson, distance)
+            }
             _ => {
                 let distance = self.calculate_haversine_distance(&coords);
                 let geojson = create_linestring_geojson(&coords);
@@ -458,7 +465,7 @@ impl MapGenerator {
         opacity: 0.8
       }}).addTo(carLayer);
       
-      layer.bindPopup('<strong>' + carGeojsons[key].properties.name + '</strong><br>Method: ' + carGeojsons[key].properties.method);
+      layer.bindPopup('<strong>' + carGeojsons[key].properties.name + '</strong><br>Method: ' + carGeojsons[key].properties.method + '<br>Distance: ' + carGeojsons[key].properties.distance.toFixed(1) + ' miles');
       
       layer.eachLayer(function(l) {{
         if (l.getBounds) {{
@@ -467,16 +474,16 @@ impl MapGenerator {
       }});
     }}
 
-    // Add plane routes
+    // Add plane routes with geodesic styling
     for (var key in planeGeojsons) {{
       var layer = L.geoJSON(planeGeojsons[key], {{
         color: '#dc2626',
         weight: 2,
         opacity: 0.8,
-        dashArray: '10, 5'
+        smoothFactor: 1.0
       }}).addTo(planeLayer);
       
-      layer.bindPopup('<strong>' + planeGeojsons[key].properties.name + '</strong><br>Method: ' + planeGeojsons[key].properties.method);
+      layer.bindPopup('<strong>' + planeGeojsons[key].properties.name + '</strong><br>Method: ' + planeGeojsons[key].properties.method + '<br>Distance: ' + planeGeojsons[key].properties.distance.toFixed(1) + ' miles (great circle)');
       
       layer.eachLayer(function(l) {{
         if (l.getBounds) {{
@@ -511,7 +518,7 @@ impl MapGenerator {
       div.innerHTML = `
         <h4>Trip Types</h4>
         <div><span style="color: #2563eb; font-weight: bold;">━━━</span> Car Trips</div>
-        <div><span style="color: #dc2626; font-weight: bold;">┅┅┅</span> Plane Trips</div>
+        <div><span style="color: #dc2626; font-weight: bold;">━━━</span> Plane Trips (Great Circle)</div>
         <div style="margin-top: 10px;">
           <span style="color: #dc2626;">●</span> Start/End Points<br>
           <span style="color: #2563eb;">●</span> Waypoints
@@ -542,13 +549,15 @@ impl MapGenerator {
           "geometry": {},
           "properties": {{
             "name": "{}",
-            "method": "{}"
+            "method": "{}",
+            "distance": {}
           }}
         }}"#,
                 i,
                 result.geojson,
                 result.trip.name.replace('"', "\\\""),
-                result.trip.get_method()
+                result.trip.get_method(),
+                result.distance
             );
 
             match result.trip.get_method() {
@@ -663,4 +672,74 @@ fn create_linestring_geojson(coords: &[Coordinates]) -> String {
         r#"{{"type": "LineString", "coordinates": [{}]}}"#,
         coord_pairs.join(",")
     )
+}
+
+/// Create a geodesic line between coordinates using great circle interpolation
+fn create_geodesic_geojson(coords: &[Coordinates]) -> String {
+    if coords.len() < 2 {
+        return create_linestring_geojson(coords);
+    }
+
+    let mut all_points = Vec::new();
+    
+    // For each segment between waypoints, create a geodesic curve
+    for window in coords.windows(2) {
+        let start = window[0];
+        let end = window[1];
+        
+        let geodesic_points = interpolate_geodesic(start, end, GEODESIC_SEGMENTS);
+        
+        // Add all points except the last one (to avoid duplicates at waypoints)
+        all_points.extend(&geodesic_points[..geodesic_points.len() - 1]);
+    }
+    
+    // Add the final point
+    if let Some(&last_coord) = coords.last() {
+        all_points.push(last_coord);
+    }
+
+    let coord_pairs: Vec<String> = all_points
+        .iter()
+        .map(|(lon, lat)| format!("[{},{}]", lon, lat))
+        .collect();
+
+    format!(
+        r#"{{"type": "LineString", "coordinates": [{}]}}"#,
+        coord_pairs.join(",")
+    )
+}
+
+/// Interpolate points along a great circle between two coordinates
+fn interpolate_geodesic(start: Coordinates, end: Coordinates, segments: usize) -> Vec<Coordinates> {
+    let (lon1, lat1) = (start.0.to_radians(), start.1.to_radians());
+    let (lon2, lat2) = (end.0.to_radians(), end.1.to_radians());
+    
+    let mut points = Vec::with_capacity(segments + 1);
+    
+    // Calculate the angular distance between the points
+    let d = haversine_distance(start, end) / EARTH_RADIUS_MILES;
+    
+    // If the distance is very small, just return the endpoints
+    if d < 0.001 {
+        return vec![start, end];
+    }
+    
+    for i in 0..=segments {
+        let f = i as f64 / segments as f64;
+        
+        // Use spherical linear interpolation (slerp) for great circle
+        let a = (1.0 - f) * d.sin() / d.sin();
+        let b = f * d.sin() / d.sin();
+        
+        let x = a * lat1.cos() * lon1.cos() + b * lat2.cos() * lon2.cos();
+        let y = a * lat1.cos() * lon1.sin() + b * lat2.cos() * lon2.sin();
+        let z = a * lat1.sin() + b * lat2.sin();
+        
+        let lat = z.atan2((x * x + y * y).sqrt());
+        let lon = y.atan2(x);
+        
+        points.push((lon.to_degrees(), lat.to_degrees()));
+    }
+    
+    points
 }
