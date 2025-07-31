@@ -517,7 +517,7 @@ impl MapGenerator {
       div.innerHTML = `
         <h4>Trip Types</h4>
         <div><span style="color: #2563eb; font-weight: bold;">━━━</span> Car Trips</div>
-        <div><span style="color: #dc2626; font-weight: bold;">━━━</span> Plane Trips (Great Circle)</div>
+        <div><span style="color: #dc2626; font-weight: bold;">━━━</span> Plane Trips</div>
         <div style="margin-top: 10px;">
           <span style="color: #dc2626;">●</span> Start/End Points<br>
           <span style="color: #2563eb;">●</span> Waypoints
@@ -574,6 +574,13 @@ impl MapGenerator {
         for result in trip_results {
             if result.coords.is_empty() {
                 continue;
+            }
+
+            for coord in &result.coords {
+                markers_js.push_str(&format!(
+                    "    L.circleMarker([{:.6}, {:.6}], {{radius: 3, color: 'red', fillColor: 'red', fillOpacity: 0.8}}).addTo(map);\n",
+                    coord.1, coord.0
+                ));
             }
 
             let trip_name = result.trip_name.replace('\'', "\\'");
