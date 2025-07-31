@@ -70,7 +70,7 @@ const API_DELAY_MS: u64 = 100; // Rate limiting delay
 const CACHE_EXPIRY_DAYS: u64 = 30; // Routes expire after 30 days
 const GEODESIC_SEGMENTS: usize = 100; // Number of segments for geodesic curves
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct TripFile {
     trips: Vec<Trip>,
 }
@@ -79,11 +79,16 @@ struct TripFile {
 struct Trip {
     name: String,
     date: Option<String>,
+    segments: Vec<TripSegment>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct TripSegment {
     method: Option<String>,
     waypoints: Vec<String>,
 }
 
-impl Trip {
+impl TripSegment {
     fn get_method(&self) -> &str {
         self.method.as_deref().unwrap_or("car")
     }
@@ -250,7 +255,7 @@ impl TripProcessor {
             );
 
             self.geocode_cache.insert(query.to_string(), coords);
-            println!("Geocoded '{}': {:?}", query, coords);
+            // println!("Geocoded '{}': {:?}", query, coords);
             Ok(coords)
         } else {
             Err(TripPlannerError::Geocoding(format!(
@@ -275,7 +280,7 @@ impl TripProcessor {
         // Check cache first
         let cache_key = self.generate_route_cache_key(coords);
         if let Some(cached_route) = self.route_cache.get(&cache_key) {
-            println!("Using cached route for {} coordinates", coords.len());
+            // println!("Using cached route for {} coordinates", coords.len());
             return Ok((cached_route.geojson.clone(), cached_route.distance_miles));
         }
 
@@ -357,49 +362,43 @@ impl TripProcessor {
             .sum()
     }
 
-    async fn process_trip(&mut self, trip: &Trip) -> Result<TripResult, TripPlannerError> {
-        println!("Processing trip: {}", trip.name);
+    async fn process_trip(&mut self, trip: &Trip) -> Result<Vec<TripResult>, TripPlannerError> {
+        let mut results = Vec::new();
 
-        let coords = self.geocode_waypoints(&trip.waypoints).await?;
-        let method = trip.get_method();
+        for segment in &trip.segments {
+            let coords = self.geocode_waypoints(&segment.waypoints).await?;
+            let method = segment.get_method();
 
-        let (geojson, distance) = match method {
-            "car" => {
-                // Try to get route data from OSRM, fall back to straight line if it fails
-                match self.get_route_data(&coords).await {
-                    Ok((geojson, distance)) => (geojson, distance),
-                    Err(e) => {
-                        println!("OSRM route failed ({}), falling back to straight-line distance", e);
-                        let distance = self.calculate_haversine_distance(&coords);
-                        let geojson = create_linestring_geojson(&coords);
-                        (geojson, distance)
-                    }
+            let (geojson, distance) = match method {
+                "car" => self.get_route_data(&coords).await
+                    .unwrap_or_else(|_| (create_linestring_geojson(&coords), self.calculate_haversine_distance(&coords))),
+                "plane" => {
+                    let dist = self.calculate_haversine_distance(&coords);
+                    (create_geodesic_geojson(&coords), dist)
                 }
-            }
-            "plane" => {
-                // Use geodesic curves for plane trips
-                let distance = self.calculate_haversine_distance(&coords);
-                let geojson = create_geodesic_geojson(&coords);
-                (geojson, distance)
-            }
-            _ => {
-                let distance = self.calculate_haversine_distance(&coords);
-                let geojson = create_linestring_geojson(&coords);
-                (geojson, distance)
-            }
-        };
+                _ => {
+                    let dist = self.calculate_haversine_distance(&coords);
+                    (create_linestring_geojson(&coords), dist)
+                }
+            };
 
-        Ok(TripResult {
-            trip: trip.clone(),
-            coords,
-            geojson,
-            distance,
-        })
+            results.push(TripResult {
+                trip_name: trip.name.clone(),
+                segment_method: method.to_string(),
+                coords,
+                geojson,
+                distance,
+            });
+        }
+
+        Ok(results)
     }
+
 }
 
 struct TripResult {
-    trip: Trip,
+    trip_name: String,
+    segment_method: String,
     coords: Vec<Coordinates>,
     geojson: String,
     distance: f64,
@@ -555,12 +554,12 @@ impl MapGenerator {
         }}"#,
                 i,
                 result.geojson,
-                result.trip.name.replace('"', "\\\""),
-                result.trip.get_method(),
+                result.trip_name.replace('"', "\\\""),
+                result.segment_method.clone(),
                 result.distance
             );
 
-            match result.trip.get_method() {
+            match result.segment_method.as_str() {
                 "plane" => plane_features.push(feature),
                 _ => car_features.push(feature),
             }
@@ -577,7 +576,7 @@ impl MapGenerator {
                 continue;
             }
 
-            let trip_name = result.trip.name.replace('\'', "\\'");
+            let trip_name = result.trip_name.replace('\'', "\\'");
             let start = result.coords[0];
             let end = result.coords[result.coords.len() - 1];
 
@@ -592,13 +591,13 @@ impl MapGenerator {
             ));
 
             // Intermediate waypoints
-            for (i, &(lon, lat)) in result.coords.iter().enumerate().skip(1).take(result.coords.len() - 2) {
-                let waypoint_label = result.trip.waypoints.get(i).map_or("Waypoint".to_string(), |w| w.replace('\'', "\\'"));
-                markers_js.push_str(&format!(
-                    "    L.circleMarker([{}, {}], {{radius: 3, color: 'red', fillColor: 'blue', fillOpacity: 0.8}}).addTo(map).bindPopup('Waypoint: {}');\n",
-                    lat, lon, waypoint_label
-                ));
-            }
+            // for (i, &(lon, lat)) in result.coords.iter().enumerate().skip(1).take(result.coords.len() - 2) {
+            //     // let waypoint_label = result.trip.waypoints.get(i).map_or("Waypoint".to_string(), |w| w.replace('\'', "\\'"));
+            //     markers_js.push_str(&format!(
+            //         "    L.circleMarker([{}, {}], {{radius: 3, color: 'red', fillColor: 'blue', fillOpacity: 0.8}}).addTo(map).bindPopup('Waypoint: {}');\n",
+            //         lat, lon, waypoint_label
+            //     ));
+            // }
         }
 
         markers_js
@@ -622,9 +621,11 @@ async fn main() -> Result<(), TripPlannerError> {
 
     // Process all trips
     for trip in &trip_file.trips {
-        let result = processor.process_trip(trip).await?;
-        *totals.entry(result.trip.get_method().to_string()).or_insert(0.0) += result.distance;
-        trip_results.push(result);
+        let results = processor.process_trip(trip).await?;
+        for result in results {
+            *totals.entry(result.segment_method.clone()).or_insert(0.0) += result.distance;
+            trip_results.push(result);
+        }
     }
 
     // Save updated caches
