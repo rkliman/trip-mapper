@@ -1,4 +1,6 @@
 use crate::Coordinates;
+use serde_json::Value;
+use reqwest::Client;
 
 // Constants moved from main.rs
 pub const METERS_TO_MILES: f64 = 1609.34;
@@ -69,10 +71,14 @@ pub fn create_geodesic_geojson(coords: &[Coordinates]) -> String {
         .map(|(lon, lat)| format!("[{},{}]", lon, lat))
         .collect();
 
-    format!(
+    let geojson = format!(
         r#"{{"type": "LineString", "coordinates": [{}]}}"#,
         coord_pairs.join(",")
-    )
+    );
+
+    println!("GeoJSON: {}", geojson);
+
+    geojson
 }
 
 /// Interpolate points along a great circle between two coordinates
@@ -126,6 +132,122 @@ pub fn get_current_timestamp() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+pub async fn fetch_osm_way_coordinates(way_id: u64) -> Result<Vec<(f64, f64)>, Box<dyn std::error::Error>> {
+    let query = format!(
+        "[out:json];way({});(._;>;);out;",
+        way_id
+    );
+    let url = "https://overpass-api.de/api/interpreter";
+    let client = Client::new();
+    let resp = client
+        .post(url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("data={}", urlencoding::encode(&query)))
+        .send()
+        .await?
+        .text()
+        .await?;
+
+    let json: Value = serde_json::from_str(&resp)?;
+
+    // Map node ID to coordinates
+    let mut node_map = std::collections::HashMap::new();
+    let mut way_nodes = Vec::new();
+
+    if let Some(elements) = json["elements"].as_array() {
+        for el in elements {
+            if el["type"] == "node" {
+                let id = el["id"].as_u64().unwrap();
+                let lat = el["lat"].as_f64().unwrap();
+                let lon = el["lon"].as_f64().unwrap();
+                node_map.insert(id, (lon, lat));
+            } else if el["type"] == "way" {
+                if let Some(nodes) = el["nodes"].as_array() {
+                    way_nodes = nodes.iter().filter_map(|n| n.as_u64()).collect();
+                }
+            }
+        }
+    }
+
+    // Build ordered coordinate list
+    let coords = way_nodes
+        .iter()
+        .filter_map(|id| node_map.get(id).copied())
+        .collect();
+
+    Ok(coords)
+}
+
+pub async fn fetch_osm_relation_coordinates(relation_id: u64) -> Result<Vec<(f64, f64)>, Box<dyn std::error::Error>> {
+    let query = format!(
+        "[out:json];relation({});(._;>;);out;",
+        relation_id
+    );
+    let url = "https://overpass-api.de/api/interpreter";
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("data={}", urlencoding::encode(&query)))
+        .send()
+        .await?
+        .text()
+        .await?;
+
+    let json: Value = serde_json::from_str(&resp)?;
+
+    // Build maps for ways and nodes
+    let mut node_map = std::collections::HashMap::new();
+    let mut way_map = std::collections::HashMap::new();
+    let mut relation_ways = Vec::new();
+
+    if let Some(elements) = json["elements"].as_array() {
+        for el in elements {
+            match el["type"].as_str() {
+                Some("node") => {
+                    let id = el["id"].as_u64().unwrap();
+                    let lat = el["lat"].as_f64().unwrap();
+                    let lon = el["lon"].as_f64().unwrap();
+                    node_map.insert(id, (lon, lat));
+                }
+                Some("way") => {
+                    let id = el["id"].as_u64().unwrap();
+                    let nodes = el["nodes"].as_array()
+                        .map(|arr| arr.iter().filter_map(|n| n.as_u64()).collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    way_map.insert(id, nodes);
+                }
+                Some("relation") => {
+                    if let Some(members) = el["members"].as_array() {
+                        for m in members {
+                            if m["type"] == "way" {
+                                if let Some(way_id) = m["ref"].as_u64() {
+                                    relation_ways.push(way_id);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Concatenate all way node coordinates in order
+    let mut coords = Vec::new();
+    for way_id in relation_ways {
+        if let Some(node_ids) = way_map.get(&way_id) {
+            for node_id in node_ids {
+                if let Some(coord) = node_map.get(node_id) {
+                    coords.push(*coord);
+                }
+            }
+        }
+    }
+
+    Ok(coords)
 }
 
 #[cfg(test)]

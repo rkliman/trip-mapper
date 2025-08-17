@@ -63,6 +63,7 @@ impl From<reqwest::Error> for TripPlannerError {
 // Configuration constants
 const NOMINATIM_BASE_URL: &str = "https://nominatim.openstreetmap.org/search";
 const OSRM_BASE_URL: &str = "https://router.project-osrm.org/route/v1/driving";
+const OSRM_FOOT_BASE_URL: &str = "https://router.project-osrm.org/route/v1/foot";
 const USER_AGENT: &str = "trip-planner-rust";
 const GEOCODE_CACHE_FILE: &str = "geocode_cache.json";
 const ROUTE_CACHE_FILE: &str = "route_cache.json";
@@ -86,7 +87,9 @@ struct Trip {
 #[derive(Debug, Deserialize, Clone)]
 struct TripSegment {
     method: Option<String>,
-    waypoints: Vec<String>,
+    waypoints: Option<Vec<String>>,
+    osm_way_id: Option<u64>,
+    osm_relation_id: Option<u64>, // <-- Add this
 }
 
 impl TripSegment {
@@ -260,11 +263,11 @@ impl TripProcessor {
     async fn get_route_data(
         &mut self,
         coords: &[Coordinates],
+        method: &str, // <-- Add method parameter
     ) -> Result<(String, f64), TripPlannerError> {
         // Check cache first
         let cache_key = generate_route_cache_key(coords);
         if let Some(cached_route) = self.route_cache.get(&cache_key) {
-            // println!("Using cached route for {} coordinates", coords.len());
             return Ok((cached_route.geojson.clone(), cached_route.distance_miles));
         }
 
@@ -273,15 +276,18 @@ impl TripProcessor {
             .map(|(lon, lat)| format!("{},{}", lon, lat))
             .collect();
 
+        // Choose OSRM profile based on method
+        let base_url = match method {
+            "hiking" | "walking" => OSRM_FOOT_BASE_URL,
+            _ => OSRM_BASE_URL,
+        };
+
         let url = format!(
             "{}/{}?overview=full&geometries=geojson",
-            OSRM_BASE_URL,
+            base_url,
             coord_strings.join(";")
         );
 
-        // println!("Requesting route from OSRM: {}", url);
-
-        // Rate limiting for API calls
         sleep(Duration::from_millis(API_DELAY_MS)).await;
 
         let response = self
@@ -301,9 +307,6 @@ impl TripProcessor {
             )));
         }
 
-        // println!("OSRM Response: {}", response_text);
-
-        // Try to parse as RouteResponse first
         match serde_json::from_str::<RouteResponse>(&response_text) {
             Ok(resp) => {
                 let route = resp
@@ -314,7 +317,6 @@ impl TripProcessor {
                 let geojson = serde_json::to_string(&route.geometry)?;
                 let distance_miles = route.distance / METERS_TO_MILES;
 
-                // Cache the successful route
                 let cached_route = CachedRoute {
                     geojson: geojson.clone(),
                     distance_miles,
@@ -325,7 +327,6 @@ impl TripProcessor {
                 Ok((geojson, distance_miles))
             }
             Err(e) => {
-                // Try to parse as error response
                 if let Ok(error_resp) = serde_json::from_str::<OSRMErrorResponse>(&response_text) {
                     Err(TripPlannerError::Geocoding(format!(
                         "OSRM API error: {} - {}",
@@ -343,16 +344,55 @@ impl TripProcessor {
         let mut results = Vec::new();
 
         for segment in &trip.segments {
-            let coords = self.geocode_waypoints(&segment.waypoints).await?;
             let method = segment.get_method();
 
+            if let Some(way_id) = segment.osm_way_id {
+                let coords = fetch_osm_way_coordinates(way_id).await
+                    .map_err(|e| TripPlannerError::Geocoding(format!("OSM fetch error: {}", e)))?;
+                let geojson = create_linestring_geojson(&coords);
+                let distance = calculate_total_haversine_distance(&coords);
+
+                results.push(TripResult {
+                    trip_name: trip.name.clone(),
+                    segment_method: method.to_string(),
+                    coords,
+                    geojson,
+                    distance,
+                });
+                continue;
+            }
+
+            if let Some(relation_id) = segment.osm_relation_id {
+                let coords = fetch_osm_relation_coordinates(relation_id).await
+                    .map_err(|e| TripPlannerError::Geocoding(format!("OSM relation fetch error: {}", e)))?;
+                let geojson = create_linestring_geojson(&coords);
+                let distance = calculate_total_haversine_distance(&coords);
+
+                results.push(TripResult {
+                    trip_name: trip.name.clone(),
+                    segment_method: method.to_string(),
+                    coords,
+                    geojson,
+                    distance,
+                });
+                continue;
+            }
+
+            let coords = if let Some(ref waypoints) = segment.waypoints {
+                self.geocode_waypoints(waypoints).await?
+            } else {
+                return Err(TripPlannerError::Geocoding("No waypoints or osm_way_id provided".to_string()));
+            };
+
             let (geojson, distance) = match method {
-                "car" => self.get_route_data(&coords).await
+                "car" => self.get_route_data(&coords, method).await
                     .unwrap_or_else(|_| (create_linestring_geojson(&coords), calculate_total_haversine_distance(&coords))),
                 "plane" => {
                     let dist = calculate_total_haversine_distance(&coords);
                     (create_geodesic_geojson(&coords), dist)
                 }
+                "hiking" | "walking" => self.get_route_data(&coords, method).await
+                    .unwrap_or_else(|_| (create_linestring_geojson(&coords), calculate_total_haversine_distance(&coords))),
                 _ => {
                     let dist = calculate_total_haversine_distance(&coords);
                     (create_linestring_geojson(&coords), dist)
