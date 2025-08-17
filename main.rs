@@ -1,4 +1,6 @@
 // main.rs
+mod utils;
+
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -8,6 +10,7 @@ use std::io::Write;
 use std::path::Path;
 use std::{fmt, fs};
 use tokio::time::{sleep, Duration};
+use utils::*;
 
 // Custom error types for better error handling
 #[derive(Debug)]
@@ -64,11 +67,9 @@ const USER_AGENT: &str = "trip-planner-rust";
 const GEOCODE_CACHE_FILE: &str = "geocode_cache.json";
 const ROUTE_CACHE_FILE: &str = "route_cache.json";
 const OUTPUT_FILE: &str = "combined_map.html";
-const METERS_TO_MILES: f64 = 1609.34;
-const EARTH_RADIUS_MILES: f64 = 3958.8;
+const MAP_TEMPLATE_FILE: &str = "map_template.html";
 const API_DELAY_MS: u64 = 100; // Rate limiting delay
 const CACHE_EXPIRY_DAYS: u64 = 30; // Routes expire after 30 days
-const GEODESIC_SEGMENTS: usize = 100; // Number of segments for geodesic curves
 
 #[derive(Debug, Deserialize, Clone)]
 struct TripFile {
@@ -117,7 +118,7 @@ struct OSRMErrorResponse {
     message: Option<String>,
 }
 
-type Coordinates = (f64, f64);
+pub type Coordinates = (f64, f64);
 type GeocodeCache = HashMap<String, Coordinates>;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -193,25 +194,8 @@ impl TripProcessor {
         Ok(())
     }
 
-    /// Generate a cache key for a route based on coordinates
-    /// Rounds coordinates to 4 decimal places (~11m precision) to allow for small variations
-    fn generate_route_cache_key(&self, coords: &[Coordinates]) -> String {
-        let rounded_coords: Vec<String> = coords
-            .iter()
-            .map(|(lon, lat)| format!("{:.4},{:.4}", lon, lat))
-            .collect();
-        format!("route:{}", rounded_coords.join(";"))
-    }
-
-    fn get_current_timestamp() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    }
-
     fn cleanup_expired_routes(route_cache: &mut RouteCache) {
-        let current_time = Self::get_current_timestamp();
+        let current_time = get_current_timestamp();
         let expiry_threshold = current_time - (CACHE_EXPIRY_DAYS * 24 * 60 * 60);
         
         route_cache.retain(|_, cached_route| {
@@ -278,7 +262,7 @@ impl TripProcessor {
         coords: &[Coordinates],
     ) -> Result<(String, f64), TripPlannerError> {
         // Check cache first
-        let cache_key = self.generate_route_cache_key(coords);
+        let cache_key = generate_route_cache_key(coords);
         if let Some(cached_route) = self.route_cache.get(&cache_key) {
             // println!("Using cached route for {} coordinates", coords.len());
             return Ok((cached_route.geojson.clone(), cached_route.distance_miles));
@@ -334,7 +318,7 @@ impl TripProcessor {
                 let cached_route = CachedRoute {
                     geojson: geojson.clone(),
                     distance_miles,
-                    cached_at: Self::get_current_timestamp(),
+                    cached_at: get_current_timestamp(),
                 };
                 self.route_cache.insert(cache_key, cached_route);
 
@@ -355,13 +339,6 @@ impl TripProcessor {
         }
     }
 
-    fn calculate_haversine_distance(&self, coords: &[Coordinates]) -> f64 {
-        coords
-            .windows(2)
-            .map(|window| haversine_distance(window[0], window[1]))
-            .sum()
-    }
-
     async fn process_trip(&mut self, trip: &Trip) -> Result<Vec<TripResult>, TripPlannerError> {
         let mut results = Vec::new();
 
@@ -371,13 +348,13 @@ impl TripProcessor {
 
             let (geojson, distance) = match method {
                 "car" => self.get_route_data(&coords).await
-                    .unwrap_or_else(|_| (create_linestring_geojson(&coords), self.calculate_haversine_distance(&coords))),
+                    .unwrap_or_else(|_| (create_linestring_geojson(&coords), calculate_total_haversine_distance(&coords))),
                 "plane" => {
-                    let dist = self.calculate_haversine_distance(&coords);
+                    let dist = calculate_total_haversine_distance(&coords);
                     (create_geodesic_geojson(&coords), dist)
                 }
                 _ => {
-                    let dist = self.calculate_haversine_distance(&coords);
+                    let dist = calculate_total_haversine_distance(&coords);
                     (create_linestring_geojson(&coords), dist)
                 }
             };
@@ -393,7 +370,6 @@ impl TripProcessor {
 
         Ok(results)
     }
-
 }
 
 struct TripResult {
@@ -408,13 +384,14 @@ struct MapGenerator;
 
 impl MapGenerator {
     fn generate_html(trip_results: &[TripResult]) -> Result<String, TripPlannerError> {
-        const TEMPLATE: &str = include_str!("map_template.html");
+        // Read the template file (or use include_str! for embedded approach)
+        let template = fs::read_to_string(MAP_TEMPLATE_FILE)?;
         
         let (car_features, plane_features) = Self::group_features_by_method(trip_results);
         let markers_js = Self::generate_markers_js(trip_results);
 
         // Replace placeholders in template
-        let html = TEMPLATE
+        let html = template
             .replace("{{CAR_FEATURES}}", &car_features.join(",\n      "))
             .replace("{{PLANE_FEATURES}}", &plane_features.join(",\n      "))
             .replace("{{MARKERS}}", &markers_js);
@@ -481,15 +458,6 @@ impl MapGenerator {
                 "    L.marker([{}, {}]).addTo(map).bindPopup('End: {}');\n",
                 end.1, end.0, trip_name
             ));
-
-            // Intermediate waypoints
-            // for (i, &(lon, lat)) in result.coords.iter().enumerate().skip(1).take(result.coords.len() - 2) {
-            //     // let waypoint_label = result.trip.waypoints.get(i).map_or("Waypoint".to_string(), |w| w.replace('\'', "\\'"));
-            //     markers_js.push_str(&format!(
-            //         "    L.circleMarker([{}, {}], {{radius: 3, color: 'red', fillColor: 'blue', fillOpacity: 0.8}}).addTo(map).bindPopup('Waypoint: {}');\n",
-            //         lat, lon, waypoint_label
-            //     ));
-            // }
         }
 
         markers_js
@@ -540,99 +508,4 @@ fn parse_yaml<P: AsRef<Path>>(path: P) -> Result<TripFile, TripPlannerError> {
     let content = fs::read_to_string(path)?;
     let parsed: TripFile = serde_yaml::from_str(&content)?;
     Ok(parsed)
-}
-
-fn haversine_distance(coord1: Coordinates, coord2: Coordinates) -> f64 {
-    let (lon1, lat1) = (coord1.0.to_radians(), coord1.1.to_radians());
-    let (lon2, lat2) = (coord2.0.to_radians(), coord2.1.to_radians());
-
-    let dlon = lon2 - lon1;
-    let dlat = lat2 - lat1;
-
-    let a = dlat.sin().powi(2) + lat1.cos() * lat2.cos() * dlon.sin().powi(2);
-    let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
-
-    EARTH_RADIUS_MILES * c
-}
-
-fn create_linestring_geojson(coords: &[Coordinates]) -> String {
-    let coord_pairs: Vec<String> = coords
-        .iter()
-        .map(|(lon, lat)| format!("[{},{}]", lon, lat))
-        .collect();
-
-    format!(
-        r#"{{"type": "LineString", "coordinates": [{}]}}"#,
-        coord_pairs.join(",")
-    )
-}
-
-/// Create a geodesic line between coordinates using great circle interpolation
-fn create_geodesic_geojson(coords: &[Coordinates]) -> String {
-    if coords.len() < 2 {
-        return create_linestring_geojson(coords);
-    }
-
-    let mut all_points = Vec::new();
-    
-    // For each segment between waypoints, create a geodesic curve
-    for window in coords.windows(2) {
-        let start = window[0];
-        let end = window[1];
-        
-        let geodesic_points = interpolate_geodesic(start, end, GEODESIC_SEGMENTS);
-        
-        // Add all points except the last one (to avoid duplicates at waypoints)
-        all_points.extend(&geodesic_points[..geodesic_points.len() - 1]);
-    }
-    
-    // Add the final point
-    if let Some(&last_coord) = coords.last() {
-        all_points.push(last_coord);
-    }
-
-    let coord_pairs: Vec<String> = all_points
-        .iter()
-        .map(|(lon, lat)| format!("[{},{}]", lon, lat))
-        .collect();
-
-    format!(
-        r#"{{"type": "LineString", "coordinates": [{}]}}"#,
-        coord_pairs.join(",")
-    )
-}
-
-/// Interpolate points along a great circle between two coordinates
-fn interpolate_geodesic(start: Coordinates, end: Coordinates, segments: usize) -> Vec<Coordinates> {
-    let (lon1, lat1) = (start.0.to_radians(), start.1.to_radians());
-    let (lon2, lat2) = (end.0.to_radians(), end.1.to_radians());
-    
-    let mut points = Vec::with_capacity(segments + 1);
-    
-    // Calculate the angular distance between the points
-    let d = haversine_distance(start, end) / EARTH_RADIUS_MILES;
-    
-    // If the distance is very small, just return the endpoints
-    if d < 0.001 {
-        return vec![start, end];
-    }
-    
-    for i in 0..=segments {
-        let f = i as f64 / segments as f64;
-        
-        // Use spherical linear interpolation (slerp) for great circle
-        let a = (1.0 - f) * d.sin() / d.sin();
-        let b = f * d.sin() / d.sin();
-        
-        let x = a * lat1.cos() * lon1.cos() + b * lat2.cos() * lon2.cos();
-        let y = a * lat1.cos() * lon1.sin() + b * lat2.cos() * lon2.sin();
-        let z = a * lat1.sin() + b * lat2.sin();
-        
-        let lat = z.atan2((x * x + y * y).sqrt());
-        let lon = y.atan2(x);
-        
-        points.push((lon.to_degrees(), lat.to_degrees()));
-    }
-    
-    points
 }
