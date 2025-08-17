@@ -89,7 +89,8 @@ struct TripSegment {
     method: Option<String>,
     waypoints: Option<Vec<String>>,
     osm_way_id: Option<u64>,
-    osm_relation_id: Option<u64>, // <-- Add this
+    osm_way_ids: Option<Vec<u64>>, // <-- Add this
+    osm_relation_id: Option<u64>,
 }
 
 impl TripSegment {
@@ -345,6 +346,22 @@ impl TripProcessor {
 
         for segment in &trip.segments {
             let method = segment.get_method();
+
+            if let Some(ref way_ids) = segment.osm_way_ids {
+                let coords = fetch_osm_ways_chained(way_ids).await
+                    .map_err(|e| TripPlannerError::Geocoding(format!("OSM fetch error: {}", e)))?;
+                let geojson = create_styled_linestring_geojson(&coords, method);
+                let distance = calculate_total_haversine_distance(&coords);
+
+                results.push(TripResult {
+                    trip_name: trip.name.clone(),
+                    segment_method: method.to_string(),
+                    coords,
+                    geojson,
+                    distance,
+                });
+                continue;
+            }
 
             if let Some(way_id) = segment.osm_way_id {
                 let coords = fetch_osm_way_coordinates(way_id).await

@@ -248,6 +248,65 @@ pub async fn fetch_osm_relation_coordinates(relation_id: u64) -> Result<Vec<(f64
     Ok(coords)
 }
 
+pub async fn fetch_osm_ways_chained(way_ids: &[u64]) -> Result<Vec<Coordinates>, Box<dyn std::error::Error>> {
+    let ids_str = way_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+    let query = format!(
+        "[out:json];way({});(._;>;);out;",
+        ids_str
+    );
+    let url = "https://overpass-api.de/api/interpreter";
+    let client = Client::new();
+    let resp = client
+        .post(url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("data={}", urlencoding::encode(&query)))
+        .send()
+        .await?
+        .text()
+        .await?;
+
+    let json: Value = serde_json::from_str(&resp)?;
+
+    // Build maps for ways and nodes
+    let mut node_map = std::collections::HashMap::new();
+    let mut way_map = std::collections::HashMap::new();
+
+    if let Some(elements) = json["elements"].as_array() {
+        for el in elements {
+            match el["type"].as_str() {
+                Some("node") => {
+                    let id = el["id"].as_u64().unwrap();
+                    let lat = el["lat"].as_f64().unwrap();
+                    let lon = el["lon"].as_f64().unwrap();
+                    node_map.insert(id, (lon, lat));
+                }
+                Some("way") => {
+                    let id = el["id"].as_u64().unwrap();
+                    let nodes = el["nodes"].as_array()
+                        .map(|arr| arr.iter().filter_map(|n| n.as_u64()).collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    way_map.insert(id, nodes);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Concatenate all way node coordinates in order
+    let mut coords = Vec::new();
+    for way_id in way_ids {
+        if let Some(node_ids) = way_map.get(way_id) {
+            for node_id in node_ids {
+                if let Some(coord) = node_map.get(node_id) {
+                    coords.push(*coord);
+                }
+            }
+        }
+    }
+
+    Ok(coords)
+}
+
 pub fn create_styled_linestring_geojson(coords: &[Coordinates], method: &str) -> String {
     let coord_pairs: Vec<String> = coords
         .iter()
