@@ -408,131 +408,16 @@ struct MapGenerator;
 
 impl MapGenerator {
     fn generate_html(trip_results: &[TripResult]) -> Result<String, TripPlannerError> {
+        const TEMPLATE: &str = include_str!("map_template.html");
+        
         let (car_features, plane_features) = Self::group_features_by_method(trip_results);
         let markers_js = Self::generate_markers_js(trip_results);
 
-        let html = format!(
-            r#"<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Combined Trip Map</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
-  <style>
-    body {{ margin: 0; padding: 0; }}
-    #map {{ width: 100%; height: 100vh; }}
-    .legend {{
-      background: white;
-      padding: 10px;
-      border-radius: 5px;
-      box-shadow: 0 0 15px rgba(0,0,0,0.2);
-    }}
-    .legend h4 {{ margin: 0 0 10px 0; }}
-  </style>
-</head>
-<body>
-  <div id="map"></div>
-  <script>
-    // Initialize map
-    var map = L.map('map').setView([0, 0], 2);
-    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-    }}).addTo(map);
-
-    var bounds = L.latLngBounds();
-
-    // Layer groups
-    var carLayer = L.layerGroup();
-    var planeLayer = L.layerGroup();
-
-    // GeoJSON data
-    var carGeojsons = {{
-      {}
-    }};
-    
-    var planeGeojsons = {{
-      {}
-    }};
-
-    // Add car routes
-    for (var key in carGeojsons) {{
-      var layer = L.geoJSON(carGeojsons[key], {{
-        color: '#2563eb',
-        weight: 3,
-        opacity: 0.8
-      }}).addTo(carLayer);
-      
-      layer.bindPopup('<strong>' + carGeojsons[key].properties.name + '</strong><br>Method: ' + carGeojsons[key].properties.method + '<br>Distance: ' + carGeojsons[key].properties.distance.toFixed(1) + ' miles');
-      
-      layer.eachLayer(function(l) {{
-        if (l.getBounds) {{
-          bounds.extend(l.getBounds());
-        }}
-      }});
-    }}
-
-    // Add plane routes with geodesic styling
-    for (var key in planeGeojsons) {{
-      var layer = L.geoJSON(planeGeojsons[key], {{
-        color: '#dc2626',
-        weight: 2,
-        opacity: 0.8,
-        smoothFactor: 1.0
-      }}).addTo(planeLayer);
-      
-      layer.bindPopup('<strong>' + planeGeojsons[key].properties.name + '</strong><br>Method: ' + planeGeojsons[key].properties.method + '<br>Distance: ' + planeGeojsons[key].properties.distance.toFixed(1) + ' miles (great circle)');
-      
-      layer.eachLayer(function(l) {{
-        if (l.getBounds) {{
-          bounds.extend(l.getBounds());
-        }}
-      }});
-    }}
-
-    // Add layers to map
-    carLayer.addTo(map);
-    planeLayer.addTo(map);
-
-    // Layer control
-    var overlays = {{
-      "Car Trips": carLayer,
-      "Plane Trips": planeLayer
-    }};
-    L.control.layers(null, overlays).addTo(map);
-
-    // Add markers
-{}
-
-    // Fit bounds
-    if (bounds.isValid()) {{
-      map.fitBounds(bounds, {{padding: [20, 20]}});
-    }}
-
-    // Add custom legend
-    var legend = L.control({{position: 'bottomright'}});
-    legend.onAdd = function (map) {{
-      var div = L.DomUtil.create('div', 'legend');
-      div.innerHTML = `
-        <h4>Trip Types</h4>
-        <div><span style="color: #2563eb; font-weight: bold;">━━━</span> Car Trips</div>
-        <div><span style="color: #dc2626; font-weight: bold;">━━━</span> Plane Trips</div>
-        <div style="margin-top: 10px;">
-          <span style="color: #dc2626;">●</span> Start/End Points<br>
-          <span style="color: #2563eb;">●</span> Waypoints
-        </div>
-      `;
-      return div;
-    }};
-    legend.addTo(map);
-  </script>
-</body>
-</html>"#,
-            car_features.join(",\n      "),
-            plane_features.join(",\n      "),
-            markers_js
-        );
+        // Replace placeholders in template
+        let html = TEMPLATE
+            .replace("{{CAR_FEATURES}}", &car_features.join(",\n      "))
+            .replace("{{PLANE_FEATURES}}", &plane_features.join(",\n      "))
+            .replace("{{MARKERS}}", &markers_js);
 
         Ok(html)
     }

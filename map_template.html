@@ -23,9 +23,9 @@
   <script>
     // Initialize map
     var map = L.map('map').setView([0, 0], 2);
-    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-    }}).addTo(map);
+    }).addTo(map);
 
     var bounds = L.latLngBounds();
 
@@ -34,83 +34,83 @@
     var planeLayer = L.layerGroup();
 
     // GeoJSON data
-    var carGeojsons = {{
-      {car_geojsons}
-    }};
+    var carGeojsons = {
+      {{CAR_FEATURES}}
+    };
     
-    var planeGeojsons = {{
-      {plane_geojsons}
-    }};
+    var planeGeojsons = {
+      {{PLANE_FEATURES}}
+    };
 
     // Add car routes
-    for (var key in carGeojsons) {{
-      var layer = L.geoJSON(carGeojsons[key], {{
+    for (var key in carGeojsons) {
+      var layer = L.geoJSON(carGeojsons[key], {
         color: '#2563eb',
         weight: 3,
         opacity: 0.8
-      }}).addTo(carLayer);
+      }).addTo(carLayer);
       
-      layer.bindPopup('<strong>' + carGeojsons[key].properties.name + '</strong><br>Method: ' + carGeojsons[key].properties.method);
+      layer.bindPopup('<strong>' + carGeojsons[key].properties.name + '</strong><br>Method: ' + carGeojsons[key].properties.method + '<br>Distance: ' + carGeojsons[key].properties.distance.toFixed(1) + ' miles');
       
-      layer.eachLayer(function(l) {{
-        if (l.getBounds) {{
+      layer.eachLayer(function(l) {
+        if (l.getBounds) {
           bounds.extend(l.getBounds());
-        }}
-      }});
-    }}
+        }
+      });
+    }
 
-    // Add plane routes
-    for (var key in planeGeojsons) {{
-      var layer = L.geoJSON(planeGeojsons[key], {{
+    // Add plane routes with geodesic styling
+    for (var key in planeGeojsons) {
+      var layer = L.geoJSON(planeGeojsons[key], {
         color: '#dc2626',
         weight: 2,
         opacity: 0.8,
-        dashArray: '10, 5'
-      }}).addTo(planeLayer);
+        smoothFactor: 1.0
+      }).addTo(planeLayer);
       
-      layer.bindPopup('<strong>' + planeGeojsons[key].properties.name + '</strong><br>Method: ' + planeGeojsons[key].properties.method);
+      layer.bindPopup('<strong>' + planeGeojsons[key].properties.name + '</strong><br>Method: ' + planeGeojsons[key].properties.method + '<br>Distance: ' + planeGeojsons[key].properties.distance.toFixed(1) + ' miles (great circle)');
       
-      layer.eachLayer(function(l) {{
-        if (l.getBounds) {{
+      layer.eachLayer(function(l) {
+        if (l.getBounds) {
           bounds.extend(l.getBounds());
-        }}
-      }});
-    }}
+        }
+      });
+    }
 
     // Add layers to map
     carLayer.addTo(map);
     planeLayer.addTo(map);
 
     // Layer control
-    var overlays = {{
+    var overlays = {
       "Car Trips": carLayer,
       "Plane Trips": planeLayer
-    }};
+    };
     L.control.layers(null, overlays).addTo(map);
 
     // Add markers
-{markers_js}
+{{MARKERS}}
 
     // Fit bounds
-    if (bounds.isValid()) {{
-      map.fitBounds(bounds, {{padding: [20, 20]}});
-    }}
+    if (bounds.isValid()) {
+      map.fitBounds(bounds, {padding: [20, 20]});
+    }
 
     // Add custom legend
-    var legend = L.control({{position: 'bottomright'}});
-    legend.onAdd = function (map) {{
+    var legend = L.control({position: 'bottomright'});
+    legend.onAdd = function (map) {
       var div = L.DomUtil.create('div', 'legend');
       div.innerHTML = `
         <h4>Trip Types</h4>
         <div><span style="color: #2563eb; font-weight: bold;">━━━</span> Car Trips</div>
-        <div><span style="color: #dc2626; font-weight: bold;">┅┅┅</span> Plane Trips</div>
+        <div><span style="color: #dc2626; font-weight: bold;">━━━</span> Plane Trips</div>
         <div style="margin-top: 10px;">
           <span style="color: #dc2626;">●</span> Start/End Points<br>
           <span style="color: #2563eb;">●</span> Waypoints
         </div>
       `;
       return div;
-    }};
+    };
     legend.addTo(map);
   </script>
 </body>
