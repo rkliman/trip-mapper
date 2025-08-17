@@ -349,7 +349,7 @@ impl TripProcessor {
             if let Some(way_id) = segment.osm_way_id {
                 let coords = fetch_osm_way_coordinates(way_id).await
                     .map_err(|e| TripPlannerError::Geocoding(format!("OSM fetch error: {}", e)))?;
-                let geojson = create_linestring_geojson(&coords);
+                let geojson = create_styled_linestring_geojson(&coords, method);
                 let distance = calculate_total_haversine_distance(&coords);
 
                 results.push(TripResult {
@@ -365,7 +365,7 @@ impl TripProcessor {
             if let Some(relation_id) = segment.osm_relation_id {
                 let coords = fetch_osm_relation_coordinates(relation_id).await
                     .map_err(|e| TripPlannerError::Geocoding(format!("OSM relation fetch error: {}", e)))?;
-                let geojson = create_linestring_geojson(&coords);
+                let geojson = create_styled_linestring_geojson(&coords, method);
                 let distance = calculate_total_haversine_distance(&coords);
 
                 results.push(TripResult {
@@ -427,33 +427,34 @@ impl MapGenerator {
         // Read the template file (or use include_str! for embedded approach)
         let template = fs::read_to_string(MAP_TEMPLATE_FILE)?;
         
-        let (car_features, plane_features) = Self::group_features_by_method(trip_results);
+        let (car_features, plane_features, hike_features) = Self::group_features_by_method(trip_results);
         let markers_js = Self::generate_markers_js(trip_results);
 
-        // Replace placeholders in template
         let html = template
             .replace("{{CAR_FEATURES}}", &car_features.join(",\n      "))
             .replace("{{PLANE_FEATURES}}", &plane_features.join(",\n      "))
+            .replace("{{HIKE_FEATURES}}", &hike_features.join(",\n      "))
             .replace("{{MARKERS}}", &markers_js);
 
         Ok(html)
     }
 
-    fn group_features_by_method(trip_results: &[TripResult]) -> (Vec<String>, Vec<String>) {
+    fn group_features_by_method(trip_results: &[TripResult]) -> (Vec<String>, Vec<String>, Vec<String>) {
         let mut car_features = Vec::new();
         let mut plane_features = Vec::new();
+        let mut hike_features = Vec::new();
 
         for (i, result) in trip_results.iter().enumerate() {
             let feature = format!(
                 r#""feature-{}": {{
-          "type": "Feature",
-          "geometry": {},
-          "properties": {{
-            "name": "{}",
-            "method": "{}",
-            "distance": {}
-          }}
-        }}"#,
+      "type": "Feature",
+      "geometry": {},
+      "properties": {{
+        "name": "{}",
+        "method": "{}",
+        "distance": {}
+      }}
+    }}"#,
                 i,
                 result.geojson,
                 result.trip_name.replace('"', "\\\""),
@@ -463,17 +464,23 @@ impl MapGenerator {
 
             match result.segment_method.as_str() {
                 "plane" => plane_features.push(feature),
+                "hiking" | "walking" => hike_features.push(feature),
                 _ => car_features.push(feature),
             }
         }
 
-        (car_features, plane_features)
+        (car_features, plane_features, hike_features)
     }
 
     fn generate_markers_js(trip_results: &[TripResult]) -> String {
         let mut markers_js = String::new();
 
         for result in trip_results {
+            // Skip markers for hiking/walking
+            if result.segment_method == "hiking" || result.segment_method == "walking" {
+                continue;
+            }
+
             if result.coords.is_empty() {
                 continue;
             }

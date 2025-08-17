@@ -32,26 +32,34 @@
     // Layer groups
     var carLayer = L.layerGroup();
     var planeLayer = L.layerGroup();
+    var hikeLayer = L.layerGroup();
 
     // GeoJSON data
     var carGeojsons = {
       {{CAR_FEATURES}}
     };
-    
     var planeGeojsons = {
       {{PLANE_FEATURES}}
+    };
+    var hikeGeojsons = {
+      {{HIKE_FEATURES}}
     };
 
     // Add car routes
     for (var key in carGeojsons) {
       var layer = L.geoJSON(carGeojsons[key], {
-        color: '#2563eb',
-        weight: 3,
-        opacity: 0.8
+        style: function(f) {
+          return {
+            color: f.properties.stroke || '#2563eb',
+            weight: f.properties["stroke-width"] || 3,
+            dashArray: f.properties["stroke-dasharray"] || null,
+            opacity: 0.8
+          };
+        }
       }).addTo(carLayer);
-      
+
       layer.bindPopup('<strong>' + carGeojsons[key].properties.name + '</strong><br>Method: ' + carGeojsons[key].properties.method + '<br>Distance: ' + carGeojsons[key].properties.distance.toFixed(1) + ' miles');
-      
+
       layer.eachLayer(function(l) {
         if (l.getBounds) {
           bounds.extend(l.getBounds());
@@ -59,17 +67,43 @@
       });
     }
 
-    // Add plane routes with geodesic styling
+    // Add plane routes
     for (var key in planeGeojsons) {
       var layer = L.geoJSON(planeGeojsons[key], {
-        color: '#dc2626',
-        weight: 2,
-        opacity: 0.8,
-        smoothFactor: 1.0
+        style: function(f) {
+          return {
+            color: f.properties.stroke || '#dc2626',
+            weight: f.properties["stroke-width"] || 2,
+            dashArray: f.properties["stroke-dasharray"] || null,
+            opacity: 0.8
+          };
+        }
       }).addTo(planeLayer);
-      
+
       layer.bindPopup('<strong>' + planeGeojsons[key].properties.name + '</strong><br>Method: ' + planeGeojsons[key].properties.method + '<br>Distance: ' + planeGeojsons[key].properties.distance.toFixed(1) + ' miles (great circle)');
-      
+
+      layer.eachLayer(function(l) {
+        if (l.getBounds) {
+          bounds.extend(l.getBounds());
+        }
+      });
+    }
+
+    // Add hiking/walking routes
+    for (var key in hikeGeojsons) {
+      var layer = L.geoJSON(hikeGeojsons[key], {
+        style: function(f) {
+          return {
+            color: f.properties.stroke || '#00ff08',
+            weight: f.properties["stroke-width"] || 5,
+            dashArray: f.properties["stroke-dasharray"] || "8,4",
+            opacity: 0.8
+          };
+        }
+      }).addTo(hikeLayer);
+
+      layer.bindPopup('<strong>' + hikeGeojsons[key].properties.name + '</strong><br>Method: ' + hikeGeojsons[key].properties.method + '<br>Distance: ' + hikeGeojsons[key].properties.distance.toFixed(1) + ' miles');
+
       layer.eachLayer(function(l) {
         if (l.getBounds) {
           bounds.extend(l.getBounds());
@@ -80,16 +114,18 @@
     // Add layers to map
     carLayer.addTo(map);
     planeLayer.addTo(map);
+    hikeLayer.addTo(map);
 
     // Layer control
     var overlays = {
       "Car Trips": carLayer,
-      "Plane Trips": planeLayer
+      "Plane Trips": planeLayer,
+      "Hiking/Walking": hikeLayer
     };
     L.control.layers(null, overlays).addTo(map);
 
     // Add markers
-{{MARKERS}}
+    {{MARKERS}}
 
     // Fit bounds
     if (bounds.isValid()) {
@@ -104,6 +140,7 @@
         <h4>Trip Types</h4>
         <div><span style="color: #2563eb; font-weight: bold;">━━━</span> Car Trips</div>
         <div><span style="color: #dc2626; font-weight: bold;">━━━</span> Plane Trips</div>
+        <div><span style="color: #FFA500; font-weight: bold;">━━━</span> Hiking/Walking</div>
         <div style="margin-top: 10px;">
           <span style="color: #dc2626;">●</span> Start/End Points<br>
           <span style="color: #2563eb;">●</span> Waypoints
@@ -112,6 +149,39 @@
       return div;
     };
     legend.addTo(map);
+
+    // Add all routes with GeoJSON properties for styling
+    var allGeojsons = {
+      {{CAR_FEATURES}},
+      {{PLANE_FEATURES}}
+    };
+
+    for (var key in allGeojsons) {
+      var feature = allGeojsons[key];
+      var layer = L.geoJSON(feature, {
+        style: function(f) {
+          // Use GeoJSON properties for color and dash
+          return {
+            color: f.properties.stroke || "#3388ff",
+            weight: f.properties["stroke-width"] || 3,
+            dashArray: f.properties["stroke-dasharray"] || null,
+            opacity: 0.8
+          };
+        }
+      }).addTo(map);
+
+      layer.bindPopup(
+        '<strong>' + (feature.properties.name || '') + '</strong><br>' +
+        'Method: ' + (feature.properties.method || '') + '<br>' +
+        'Distance: ' + (feature.properties.distance ? feature.properties.distance.toFixed(1) : '?') + ' miles'
+      );
+
+      layer.eachLayer(function(l) {
+        if (l.getBounds) {
+          bounds.extend(l.getBounds());
+        }
+      });
+    }
   </script>
 </body>
 </html>

@@ -76,8 +76,6 @@ pub fn create_geodesic_geojson(coords: &[Coordinates]) -> String {
         coord_pairs.join(",")
     );
 
-    println!("GeoJSON: {}", geojson);
-
     geojson
 }
 
@@ -248,6 +246,36 @@ pub async fn fetch_osm_relation_coordinates(relation_id: u64) -> Result<Vec<(f64
     }
 
     Ok(coords)
+}
+
+pub fn create_styled_linestring_geojson(coords: &[Coordinates], method: &str) -> String {
+    let coord_pairs: Vec<String> = coords
+        .iter()
+        .map(|(lon, lat)| format!("[{},{}]", lon, lat))
+        .collect();
+
+    // Style for hiking/walking
+    let (stroke, dasharray) = match method {
+        "hiking" | "walking" => ("#FFA500", "8,4"), // orange dashed
+        _ => ("#3388ff", "1"), // default blue solid
+    };
+
+    format!(
+        r#"{{
+            "type": "LineString",
+            "coordinates": [{}],
+            "properties": {{
+                "stroke": "{}",
+                "stroke-width": 3,
+                "stroke-dasharray": "{}",
+                "method": "{}"
+            }}
+        }}"#,
+        coord_pairs.join(","),
+        stroke,
+        dasharray,
+        method
+    )
 }
 
 #[cfg(test)]
